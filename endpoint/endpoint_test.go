@@ -220,6 +220,10 @@ func TestIsLess(t *testing.T) {
 		{"1-2-3-4.example.org", "EXAMPLE.ORG"},
 		{"1-2-3-4.example.org", "EXAMPLE.ORG", "1.2.3.4"},
 		{"example.com", "example.org"},
+		{"z.example.org"},
+		{"2001:db8::1"},
+		{"2001:db8::1"},
+		{"example.org"},
 	}
 	testsB := []Targets{
 		{"", ""},
@@ -230,6 +234,10 @@ func TestIsLess(t *testing.T) {
 		{"1.2.3.4", "EXAMPLE.ORG"},
 		{"1-2-3-4.example.org", "EXAMPLE.ORG"},
 		{"example.com", "example.org"},
+		{"a.example.org"},
+		{"2001:db8::2"},
+		{"example.org"},
+		{"2001:db8::1"},
 	}
 	expected := []bool{
 		true,
@@ -239,6 +247,10 @@ func TestIsLess(t *testing.T) {
 		false,
 		false,
 		false,
+		false,
+		false,
+		true,
+		true,
 		false,
 	}
 
