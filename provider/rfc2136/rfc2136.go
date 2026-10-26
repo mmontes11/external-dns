@@ -425,17 +425,24 @@ func (r *rfc2136Provider) List() ([]dns.RR, error) {
 func (r *rfc2136Provider) ApplyChanges(_ context.Context, changes *plan.Changes) error {
 	log.Debugf("ApplyChanges (Create: %d, UpdateOld: %d, UpdateNew: %d, Delete: %d)", len(changes.Create), len(changes.UpdateOld), len(changes.UpdateNew), len(changes.Delete))
 
-	var errs []error
+	errs := r.applyCreateChanges(changes)
+	errs = append(errs, r.applyUpdateChanges(changes)...)
+	errs = append(errs, r.applyDeleteChanges(changes)...)
 
+	if len(errs) > 0 {
+		return provider.NewSoftErrorf("RFC2136 had errors in one or more of its batches: %v", errs)
+	}
+
+	return nil
+}
+
+// applyCreateChanges sends one update message per batch of create endpoints.
+func (r *rfc2136Provider) applyCreateChanges(changes *plan.Changes) []error {
+	var errs []error
 	for c, chunk := range chunkBy(changes.Create, r.batchChangeSize) {
 		log.Debugf("Processing batch %d of create changes", c)
 
-		m := make(map[string]*dns.Msg)
-		m["."] = new(dns.Msg) // Add the root zone
-		for _, z := range r.zoneNames {
-			z = dns.Fqdn(z)
-			m[z] = new(dns.Msg)
-		}
+		m := r.newChangeMsgs()
 		for _, ep := range chunk {
 			if !r.domainFilter.Match(ep.DNSName) {
 				log.Debugf("Skipping record %s because it was filtered out by the specified --domain-filter", ep.DNSName)
@@ -447,29 +454,19 @@ func (r *rfc2136Provider) ApplyChanges(_ context.Context, changes *plan.Changes)
 
 			r.AddRecord(m[zone], ep)
 		}
-
-		// only send if there are records available
-		for _, z := range m {
-			if len(z.Ns) > 0 {
-				if err := r.actions.SendMessage(z); err != nil {
-					log.Errorf("RFC2136 create record failed: %v", err)
-					errs = append(errs, err)
-					continue
-				}
-			}
-		}
+		errs = append(errs, r.sendChangeMsgs(m, "create")...)
 	}
+	return errs
+}
 
+// applyUpdateChanges sends one update message per batch of updated endpoints,
+// pairing each new endpoint with the old record at the same global index.
+func (r *rfc2136Provider) applyUpdateChanges(changes *plan.Changes) []error {
+	var errs []error
 	for c, chunk := range chunkBy(changes.UpdateNew, r.batchChangeSize) {
 		log.Debugf("Processing batch %d of update changes", c)
 
-		m := make(map[string]*dns.Msg)
-		m["."] = new(dns.Msg) // Add the root zone
-		for _, z := range r.zoneNames {
-			z = dns.Fqdn(z)
-			m[z] = new(dns.Msg)
-		}
-
+		m := r.newChangeMsgs()
 		for i, ep := range chunk {
 			if !r.domainFilter.Match(ep.DNSName) {
 				log.Debugf("Skipping record %s because it was filtered out by the specified --domain-filter", ep.DNSName)
@@ -483,28 +480,18 @@ func (r *rfc2136Provider) ApplyChanges(_ context.Context, changes *plan.Changes)
 			j := (c * r.batchChangeSize) + i
 			r.UpdateRecord(m[zone], changes.UpdateOld[j], ep)
 		}
-
-		// only send if there are records available
-		for _, z := range m {
-			if len(z.Ns) > 0 {
-				if err := r.actions.SendMessage(z); err != nil {
-					log.Errorf("RFC2136 update record failed: %v", err)
-					errs = append(errs, err)
-					continue
-				}
-			}
-		}
+		errs = append(errs, r.sendChangeMsgs(m, "update")...)
 	}
+	return errs
+}
 
+// applyDeleteChanges sends one update message per batch of deleted endpoints.
+func (r *rfc2136Provider) applyDeleteChanges(changes *plan.Changes) []error {
+	var errs []error
 	for c, chunk := range chunkBy(changes.Delete, r.batchChangeSize) {
 		log.Debugf("Processing batch %d of delete changes", c)
 
-		m := make(map[string]*dns.Msg)
-		m["."] = new(dns.Msg) // Add the root zone
-		for _, z := range r.zoneNames {
-			z = dns.Fqdn(z)
-			m[z] = new(dns.Msg)
-		}
+		m := r.newChangeMsgs()
 		for _, ep := range chunk {
 			if !r.domainFilter.Match(ep.DNSName) {
 				log.Debugf("Skipping record %s because it was filtered out by the specified --domain-filter", ep.DNSName)
@@ -516,24 +503,38 @@ func (r *rfc2136Provider) ApplyChanges(_ context.Context, changes *plan.Changes)
 
 			r.RemoveRecord(m[zone], ep)
 		}
+		errs = append(errs, r.sendChangeMsgs(m, "delete")...)
+	}
+	return errs
+}
 
-		// only send if there are records available
-		for _, z := range m {
-			if len(z.Ns) > 0 {
-				if err := r.actions.SendMessage(z); err != nil {
-					log.Errorf("RFC2136 delete record failed: %v", err)
-					errs = append(errs, err)
-					continue
-				}
+// newChangeMsgs builds one empty update message for the root zone and each
+// configured zone, ready to be filled with record changes.
+func (r *rfc2136Provider) newChangeMsgs() map[string]*dns.Msg {
+	m := make(map[string]*dns.Msg)
+	m["."] = new(dns.Msg) // Add the root zone
+	for _, z := range r.zoneNames {
+		z = dns.Fqdn(z)
+		m[z] = new(dns.Msg)
+	}
+	return m
+}
+
+// sendChangeMsgs sends each prepared message that has records to update and
+// returns the send failures, if any.
+func (r *rfc2136Provider) sendChangeMsgs(m map[string]*dns.Msg, action string) []error {
+	var errs []error
+	// only send if there are records available
+	for _, z := range m {
+		if len(z.Ns) > 0 {
+			if err := r.actions.SendMessage(z); err != nil {
+				log.Errorf("RFC2136 %s record failed: %v", action, err)
+				errs = append(errs, err)
+				continue
 			}
 		}
 	}
-
-	if len(errs) > 0 {
-		return provider.NewSoftErrorf("RFC2136 had errors in one or more of its batches: %v", errs)
-	}
-
-	return nil
+	return errs
 }
 
 func (r *rfc2136Provider) UpdateRecord(m *dns.Msg, oldEp *endpoint.Endpoint, newEp *endpoint.Endpoint) error {

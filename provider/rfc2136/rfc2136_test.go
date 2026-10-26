@@ -1641,3 +1641,115 @@ func TestRFC2136ShouldSignAXFR(t *testing.T) {
 		})
 	}
 }
+
+// newFailingStubProvider returns a root-zone provider whose every send fails.
+func newFailingStubProvider(t *testing.T) provider.Provider {
+	t.Helper()
+	stub := &failingRfc2136Stub{
+		output:                make([]*dns.Envelope, 0),
+		updateMsgs:            make([]*dns.Msg, 0),
+		createMsgs:            make([]*dns.Msg, 0),
+		nameservers:           []string{"unreachable-nameserver:53"},
+		randGen:               rand.New(rand.NewSource(time.Now().UnixNano())),
+		loadBalancingStrategy: "round-robin",
+	}
+	p, err := newProvider([]string{""}, 0, nil, false, false, "key", "secret", "hmac-sha512", true, &endpoint.DomainFilter{}, false, 300*time.Second, false, "", "", "", 50, TLSConfig{}, "", stub)
+	require.NoError(t, err)
+	return p
+}
+
+// A failed update send must surface as a SoftError like the create path does.
+func TestRfc2136ApplyChangesUpdateSendFailureReturnsSoftError(t *testing.T) {
+	p := newFailingStubProvider(t)
+
+	pChanges := &plan.Changes{
+		UpdateOld: []*endpoint.Endpoint{
+			{DNSName: "v1.foo.com", RecordType: "A", Targets: []string{"1.2.3.4"}, RecordTTL: endpoint.TTL(400)},
+		},
+		UpdateNew: []*endpoint.Endpoint{
+			{DNSName: "v1.foo.com", RecordType: "A", Targets: []string{"1.2.3.5"}, RecordTTL: endpoint.TTL(400)},
+		},
+	}
+
+	err := p.ApplyChanges(t.Context(), pChanges)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, provider.SoftError)
+}
+
+// A failed delete send must surface as a SoftError like the create path does.
+func TestRfc2136ApplyChangesDeleteSendFailureReturnsSoftError(t *testing.T) {
+	p := newFailingStubProvider(t)
+
+	pChanges := &plan.Changes{
+		Delete: []*endpoint.Endpoint{
+			{DNSName: "v1.foo.com", RecordType: "A", Targets: []string{"1.2.3.4"}, RecordTTL: endpoint.TTL(400)},
+		},
+	}
+
+	err := p.ApplyChanges(t.Context(), pChanges)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, provider.SoftError)
+}
+
+// When every endpoint in a change is filtered out, no messages may be sent.
+func TestRfc2136ApplyChangesFilteredEndpointsSendNoMessages(t *testing.T) {
+	stub := newStub()
+	p, err := newProvider([]string{""}, 0, nil, false, false, "key", "secret", "hmac-sha512", true, endpoint.NewDomainFilter([]string{"foo.com"}), false, 300*time.Second, false, "", "", "", 50, TLSConfig{}, "", stub)
+	require.NoError(t, err)
+
+	pChanges := &plan.Changes{
+		Create: []*endpoint.Endpoint{
+			{DNSName: "v1.bar.com", RecordType: "A", Targets: []string{"1.2.3.4"}, RecordTTL: endpoint.TTL(400)},
+		},
+		UpdateOld: []*endpoint.Endpoint{
+			{DNSName: "v2.bar.com", RecordType: "A", Targets: []string{"1.2.3.4"}, RecordTTL: endpoint.TTL(400)},
+		},
+		UpdateNew: []*endpoint.Endpoint{
+			{DNSName: "v2.bar.com", RecordType: "A", Targets: []string{"1.2.3.5"}, RecordTTL: endpoint.TTL(400)},
+		},
+		Delete: []*endpoint.Endpoint{
+			{DNSName: "v3.bar.com", RecordType: "A", Targets: []string{"1.2.3.4"}, RecordTTL: endpoint.TTL(400)},
+		},
+	}
+
+	err = p.ApplyChanges(t.Context(), pChanges)
+	require.NoError(t, err)
+	assert.Empty(t, stub.createMsgs)
+	assert.Empty(t, stub.updateMsgs)
+}
+
+// A filtered-out endpoint must not shift the UpdateOld/UpdateNew pairing: the
+// remaining endpoint of its chunk keeps its own old record.
+func TestRfc2136ApplyChangesUpdateKeepsOldNewPairingAcrossFilter(t *testing.T) {
+	stub := newStub()
+	p, err := newProvider([]string{""}, 0, nil, false, false, "key", "secret", "hmac-sha512", true, endpoint.NewDomainFilter([]string{"foo.com"}), false, 300*time.Second, false, "", "", "", 2, TLSConfig{}, "", stub)
+	require.NoError(t, err)
+
+	pChanges := &plan.Changes{
+		UpdateOld: []*endpoint.Endpoint{
+			{DNSName: "v1.foo.com", RecordType: "A", Targets: []string{"10.0.0.1"}, RecordTTL: endpoint.TTL(400)},
+			{DNSName: "v2.foo.com", RecordType: "A", Targets: []string{"10.0.0.2"}, RecordTTL: endpoint.TTL(400)},
+			{DNSName: "v3.bar.com", RecordType: "A", Targets: []string{"10.0.0.3"}, RecordTTL: endpoint.TTL(400)},
+			{DNSName: "v4.foo.com", RecordType: "A", Targets: []string{"10.0.0.4"}, RecordTTL: endpoint.TTL(400)},
+		},
+		UpdateNew: []*endpoint.Endpoint{
+			{DNSName: "v1.foo.com", RecordType: "A", Targets: []string{"10.0.1.1"}, RecordTTL: endpoint.TTL(400)},
+			{DNSName: "v2.foo.com", RecordType: "A", Targets: []string{"10.0.1.2"}, RecordTTL: endpoint.TTL(400)},
+			{DNSName: "v3.bar.com", RecordType: "A", Targets: []string{"10.0.1.3"}, RecordTTL: endpoint.TTL(400)},
+			{DNSName: "v4.foo.com", RecordType: "A", Targets: []string{"10.0.1.4"}, RecordTTL: endpoint.TTL(400)},
+		},
+	}
+
+	err = p.ApplyChanges(t.Context(), pChanges)
+	require.NoError(t, err)
+
+	assert.Len(t, stub.updateMsgs, 3)
+	assert.Contains(t, stub.updateMsgs[0].String(), "v1.foo.com.\t0\tNONE\tA\t10.0.0.1")
+	assert.Contains(t, stub.updateMsgs[0].String(), "v1.foo.com.\t400\tIN\tA\t10.0.1.1")
+	assert.Contains(t, stub.updateMsgs[0].String(), "v2.foo.com.\t0\tNONE\tA\t10.0.0.2")
+	assert.Contains(t, stub.updateMsgs[0].String(), "v2.foo.com.\t400\tIN\tA\t10.0.1.2")
+	assert.Contains(t, stub.updateMsgs[2].String(), "v4.foo.com.\t0\tNONE\tA\t10.0.0.4")
+	assert.Contains(t, stub.updateMsgs[2].String(), "v4.foo.com.\t400\tIN\tA\t10.0.1.4")
+	assert.NotContains(t, stub.updateMsgs[2].String(), "10.0.0.3")
+	assert.NotContains(t, stub.updateMsgs[2].String(), "v3.bar.com")
+}
