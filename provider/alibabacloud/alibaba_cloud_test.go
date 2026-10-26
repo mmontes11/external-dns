@@ -600,6 +600,32 @@ func TestAlibabaCloudProvider_PrivateZone_ApplyChanges(t *testing.T) {
 	assert.True(t, testutils.SameEndpoints(changedEndpoints, endpoints), "expected and actual endpoints don't match. %s:%s", changedEndpoints, endpoints)
 }
 
+func TestAlibabaCloudProvider_PrivateZone_UpdateRecords(t *testing.T) {
+	domain := "container-service.top"
+	otherDomain := "other.top"
+	provider := newTestAlibabaCloudProviderWithConfig(
+		endpoint.NewDomainFilter([]string{domain, otherDomain}), true, map[string][]*endpoint.Endpoint{
+			domain: createDefaultEndpoints(domain),
+		},
+	)
+	client := provider.pvtzClient.(*MockAlibabaCloudPrivateZoneAPI)
+	changes := plan.Changes{
+		UpdateNew: []*endpoint.Endpoint{
+			// target 1.2.3.4 is dropped: the existing record is deleted and 9.9.9.9 created
+			endpoint.NewEndpointWithTTL("abc."+domain, "A", 300, "9.9.9.9"),
+			// matches the existing record exactly: no update
+			endpoint.NewEndpointWithTTL("a-abc."+domain, "TXT", 300, "\"heritage=external-dns,external-dns/owner=default\""),
+			// no private zone exists for this domain: skipped
+			endpoint.NewEndpointWithTTL("abc."+otherDomain, "A", 300, "8.8.8.8"),
+		},
+	}
+
+	require.NoError(t, provider.ApplyChanges(t.Context(), &changes))
+	assert.Equal(t, 1, client.deleteZoneRecordCalls)
+	assert.Equal(t, 1, client.addZoneRecordCalls)
+	assert.Zero(t, client.updateZoneRecordCalls)
+}
+
 func TestAlibabaCloudProvider_DNSDryRun(t *testing.T) {
 	provider := newTestAlibabaCloudProvider(false)
 	provider.dryRun = true
