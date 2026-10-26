@@ -249,6 +249,78 @@ func TestIsLess(t *testing.T) {
 	}
 }
 
+func TestIsLessTargetComparison(t *testing.T) {
+	tests := []struct {
+		name     string
+		a        Targets
+		b        Targets
+		expected bool
+	}{
+		{
+			name:     "identical targets are never less",
+			a:        Targets{"1.2.3.4"},
+			b:        Targets{"1.2.3.4"},
+			expected: false,
+		},
+		{
+			name:     "shorter target list is less",
+			a:        Targets{"1.2.3.4"},
+			b:        Targets{"1.2.3.4", "1.2.3.5"},
+			expected: true,
+		},
+		{
+			name:     "longer target list is not less",
+			a:        Targets{"1.2.3.4", "1.2.3.5"},
+			b:        Targets{"1.2.3.4"},
+			expected: false,
+		},
+		{
+			name:     "ip address is less than fqdn",
+			a:        Targets{"1.2.3.4"},
+			b:        Targets{"one.example.org"},
+			expected: true,
+		},
+		{
+			name:     "fqdn is not less than ip address",
+			a:        Targets{"one.example.org"},
+			b:        Targets{"1.2.3.4"},
+			expected: false,
+		},
+		{
+			name:     "ipv6 addresses compare numerically",
+			a:        Targets{"2001:db8::1"},
+			b:        Targets{"2001:db8::2"},
+			expected: true,
+		},
+		{
+			name:     "shortened ipv6 form is less than a larger expanded address",
+			a:        Targets{"2001:db8::1"},
+			b:        Targets{"2001:0db8:0000:0000:0000:0000:0000:0002"},
+			expected: true,
+		},
+		{
+			name:     "expanded ipv6 form is not less than the same shortened address",
+			a:        Targets{"2001:0db8:0000:0000:0000:0000:0000:0001"},
+			b:        Targets{"2001:db8::1"},
+			expected: false,
+		},
+		{
+			name:     "same ipv6 address in different forms is not less",
+			a:        Targets{"2001:db8::1"},
+			b:        Targets{"2001:0db8:0000:0000:0000:0000:0000:0001"},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.a.IsLess(tt.b); got != tt.expected {
+				t.Errorf("%v.IsLess(%v) = %v, expected %v", tt.a, tt.b, got, tt.expected)
+			}
+		})
+	}
+}
+
 func TestGetProviderSpecificProperty(t *testing.T) {
 	t.Run("empty provider specific", func(t *testing.T) {
 		e := &Endpoint{}
