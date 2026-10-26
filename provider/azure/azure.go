@@ -469,6 +469,18 @@ func formatAzureDNSName(recordName, zoneName string) string {
 	return fmt.Sprintf("%s.%s", recordName, zoneName)
 }
 
+// azureTargetExtractors extracts the targets of one record type from the
+// record set properties. Each extractor returns nil when the properties hold
+// no target of its type, so the first non-empty result wins.
+var azureTargetExtractors = []func(*dns.RecordSetProperties) []string{
+	extractAzureATargets,
+	extractAzureAaaaTargets,
+	extractAzureCnameTargets,
+	extractAzureMxTargets,
+	extractAzureNsTargets,
+	extractAzureTxtTargets,
+}
+
 // Helper function (shared with text code)
 func extractAzureTargets(recordSet *dns.RecordSet) []string {
 	properties := recordSet.Properties
@@ -476,61 +488,87 @@ func extractAzureTargets(recordSet *dns.RecordSet) []string {
 		return []string{}
 	}
 
-	// Check for A records
-	aRecords := properties.ARecords
-	if len(aRecords) > 0 && (aRecords)[0].IPv4Address != nil {
-		targets := make([]string, len(aRecords))
-		for i, aRecord := range aRecords {
-			targets[i] = *aRecord.IPv4Address
-		}
-		return targets
-	}
-
-	// Check for AAAA records
-	aaaaRecords := properties.AaaaRecords
-	if len(aaaaRecords) > 0 && (aaaaRecords)[0].IPv6Address != nil {
-		targets := make([]string, len(aaaaRecords))
-		for i, aaaaRecord := range aaaaRecords {
-			targets[i] = *aaaaRecord.IPv6Address
-		}
-		return targets
-	}
-
-	// Check for CNAME records
-	cnameRecord := properties.CnameRecord
-	if cnameRecord != nil && cnameRecord.Cname != nil {
-		return []string{*cnameRecord.Cname}
-	}
-
-	// Check for MX records
-	mxRecords := properties.MxRecords
-	if len(mxRecords) > 0 && (mxRecords)[0].Exchange != nil {
-		targets := make([]string, len(mxRecords))
-		for i, mxRecord := range mxRecords {
-			targets[i] = fmt.Sprintf("%d %s", *mxRecord.Preference, *mxRecord.Exchange)
-		}
-		return targets
-	}
-
-	// Check for NS records
-	nsRecords := properties.NsRecords
-	if len(nsRecords) > 0 && (nsRecords)[0].Nsdname != nil {
-		targets := make([]string, len(nsRecords))
-		for i, nsRecord := range nsRecords {
-			targets[i] = *nsRecord.Nsdname
-		}
-		return targets
-	}
-
-	// Check for TXT records
-	txtRecords := properties.TxtRecords
-	if len(txtRecords) > 0 && (txtRecords)[0].Value != nil {
-		values := (txtRecords)[0].Value
-		if len(values) > 0 {
-			return []string{*(values)[0]}
+	for _, extractTargets := range azureTargetExtractors {
+		if targets := extractTargets(properties); len(targets) > 0 {
+			return targets
 		}
 	}
 	return []string{}
+}
+
+// extractAzureATargets checks for A records and returns their IPv4 addresses.
+func extractAzureATargets(properties *dns.RecordSetProperties) []string {
+	aRecords := properties.ARecords
+	if len(aRecords) == 0 || aRecords[0].IPv4Address == nil {
+		return nil
+	}
+	targets := make([]string, len(aRecords))
+	for i, aRecord := range aRecords {
+		targets[i] = *aRecord.IPv4Address
+	}
+	return targets
+}
+
+// extractAzureAaaaTargets checks for AAAA records and returns their IPv6 addresses.
+func extractAzureAaaaTargets(properties *dns.RecordSetProperties) []string {
+	aaaaRecords := properties.AaaaRecords
+	if len(aaaaRecords) == 0 || aaaaRecords[0].IPv6Address == nil {
+		return nil
+	}
+	targets := make([]string, len(aaaaRecords))
+	for i, aaaaRecord := range aaaaRecords {
+		targets[i] = *aaaaRecord.IPv6Address
+	}
+	return targets
+}
+
+// extractAzureCnameTargets checks for CNAME records and returns their target.
+func extractAzureCnameTargets(properties *dns.RecordSetProperties) []string {
+	cnameRecord := properties.CnameRecord
+	if cnameRecord == nil || cnameRecord.Cname == nil {
+		return nil
+	}
+	return []string{*cnameRecord.Cname}
+}
+
+// extractAzureMxTargets checks for MX records and returns them formatted as
+// "preference exchange" strings.
+func extractAzureMxTargets(properties *dns.RecordSetProperties) []string {
+	mxRecords := properties.MxRecords
+	if len(mxRecords) == 0 || mxRecords[0].Exchange == nil {
+		return nil
+	}
+	targets := make([]string, len(mxRecords))
+	for i, mxRecord := range mxRecords {
+		targets[i] = fmt.Sprintf("%d %s", *mxRecord.Preference, *mxRecord.Exchange)
+	}
+	return targets
+}
+
+// extractAzureNsTargets checks for NS records and returns their nameserver names.
+func extractAzureNsTargets(properties *dns.RecordSetProperties) []string {
+	nsRecords := properties.NsRecords
+	if len(nsRecords) == 0 || nsRecords[0].Nsdname == nil {
+		return nil
+	}
+	targets := make([]string, len(nsRecords))
+	for i, nsRecord := range nsRecords {
+		targets[i] = *nsRecord.Nsdname
+	}
+	return targets
+}
+
+// extractAzureTxtTargets checks for TXT records and returns the first value of
+// the first record.
+func extractAzureTxtTargets(properties *dns.RecordSetProperties) []string {
+	txtRecords := properties.TxtRecords
+	if len(txtRecords) == 0 || txtRecords[0].Value == nil {
+		return nil
+	}
+	if values := txtRecords[0].Value; len(values) > 0 {
+		return []string{*values[0]}
+	}
+	return nil
 }
 
 // extractMetadataFromRecordSet extracts Azure RecordSet metadata into endpoint ProviderSpecific properties.

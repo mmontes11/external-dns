@@ -344,6 +344,105 @@ func TestAzureMultiRecord(t *testing.T) {
 	validateAzureEndpoints(t, actual, expected)
 }
 
+func TestExtractAzureTargets(t *testing.T) {
+	ttl := int64(300)
+	tests := []struct {
+		name       string
+		properties *dns.RecordSetProperties
+		expected   []string
+	}{
+		{
+			name:       "nil properties",
+			properties: nil,
+			expected:   []string{},
+		},
+		{
+			name:       "A records",
+			properties: aRecordSetPropertiesGetter([]string{"1.2.3.4", "5.6.7.8"}, ttl),
+			expected:   []string{"1.2.3.4", "5.6.7.8"},
+		},
+		{
+			name: "A record with nil address falls through to AAAA",
+			properties: &dns.RecordSetProperties{
+				TTL:      new(ttl),
+				ARecords: []*dns.ARecord{{IPv4Address: nil}},
+				AaaaRecords: []*dns.AaaaRecord{
+					{IPv6Address: new("2001::1")},
+				},
+			},
+			expected: []string{"2001::1"},
+		},
+		{
+			name:       "AAAA records",
+			properties: aaaaRecordSetPropertiesGetter([]string{"2001::1", "2001::2"}, ttl),
+			expected:   []string{"2001::1", "2001::2"},
+		},
+		{
+			name:       "CNAME record",
+			properties: cNameRecordSetPropertiesGetter([]string{"hack.example.com"}, ttl),
+			expected:   []string{"hack.example.com"},
+		},
+		{
+			name: "CNAME with nil target falls through to NS",
+			properties: &dns.RecordSetProperties{
+				TTL:         new(ttl),
+				CnameRecord: &dns.CnameRecord{Cname: nil},
+				NsRecords:   nsRecordSetPropertiesGetter([]string{"ns1.example.com."}, ttl).NsRecords,
+			},
+			expected: []string{"ns1.example.com."},
+		},
+		{
+			name: "MX records",
+			properties: &dns.RecordSetProperties{
+				TTL: new(ttl),
+				MxRecords: []*dns.MxRecord{
+					{Preference: new(int32(10)), Exchange: new("mx1.example.com")},
+					{Preference: new(int32(20)), Exchange: new("mx2.example.com")},
+				},
+			},
+			expected: []string{"10 mx1.example.com", "20 mx2.example.com"},
+		},
+		{
+			name:       "NS records",
+			properties: nsRecordSetPropertiesGetter([]string{"ns1.example.com.", "ns2.example.com."}, ttl),
+			expected:   []string{"ns1.example.com.", "ns2.example.com."},
+		},
+		{
+			name:       "TXT record",
+			properties: txtRecordSetPropertiesGetter([]string{"hello world"}, ttl),
+			expected:   []string{"hello world"},
+		},
+		{
+			name: "TXT record with nil value",
+			properties: &dns.RecordSetProperties{
+				TTL:        new(ttl),
+				TxtRecords: []*dns.TxtRecord{{Value: nil}},
+			},
+			expected: []string{},
+		},
+		{
+			name: "TXT record with empty value slice",
+			properties: &dns.RecordSetProperties{
+				TTL:        new(ttl),
+				TxtRecords: []*dns.TxtRecord{{Value: []*string{}}},
+			},
+			expected: []string{},
+		},
+		{
+			name:       "no supported records",
+			properties: othersRecordSetPropertiesGetter(nil, ttl),
+			expected:   []string{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			recordSet := &dns.RecordSet{Properties: tt.properties}
+			assert.Equal(t, tt.expected, extractAzureTargets(recordSet))
+		})
+	}
+}
+
 func TestAzureApplyChanges(t *testing.T) {
 	recordsClient := mockRecordSetsClient{}
 
