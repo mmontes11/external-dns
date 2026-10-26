@@ -307,15 +307,38 @@ func (p *LinodeProvider) ApplyChanges(ctx context.Context, changes *plan.Changes
 		recordsByZoneID[strconv.Itoa(zone.ID)] = append(recordsByZoneID[strconv.Itoa(zone.ID)], records...)
 	}
 
-	createsByZone := endpointsByZone(zoneNameIDMapper, changes.Create)
-	updatesByZone := endpointsByZone(zoneNameIDMapper, changes.UpdateNew)
-	deletesByZone := endpointsByZone(zoneNameIDMapper, changes.Delete)
-
 	var linodeCreates []LinodeChangeCreate
 	var linodeUpdates []LinodeChangeUpdate
 	var linodeDeletes []LinodeChangeDelete
 
-	// Generate Creates
+	creates, err := buildLinodeCreates(zonesByID, recordsByZoneID, endpointsByZone(zoneNameIDMapper, changes.Create))
+	if err != nil {
+		return err
+	}
+	linodeCreates = append(linodeCreates, creates...)
+
+	updateCreates, updates, updateDeletes, err := buildLinodeUpdates(zonesByID, recordsByZoneID, endpointsByZone(zoneNameIDMapper, changes.UpdateNew))
+	if err != nil {
+		return err
+	}
+	linodeCreates = append(linodeCreates, updateCreates...)
+	linodeUpdates = append(linodeUpdates, updates...)
+	linodeDeletes = append(linodeDeletes, updateDeletes...)
+
+	linodeDeletes = append(linodeDeletes, buildLinodeDeletes(zonesByID, recordsByZoneID, endpointsByZone(zoneNameIDMapper, changes.Delete))...)
+
+	return p.submitChanges(ctx, LinodeChanges{
+		Creates: linodeCreates,
+		Deletes: linodeDeletes,
+		Updates: linodeUpdates,
+	})
+}
+
+// buildLinodeCreates converts planned record creations into Linode API calls,
+// skipping records that already exist in the zone.
+func buildLinodeCreates(zonesByID map[string]linodego.Domain, recordsByZoneID map[string][]linodego.DomainRecord, createsByZone map[string][]endpoint.Endpoint) ([]LinodeChangeCreate, error) {
+	var linodeCreates []LinodeChangeCreate
+
 	for zoneID, creates := range createsByZone {
 		zone := zonesByID[zoneID]
 
@@ -344,27 +367,29 @@ func (p *LinodeProvider) ApplyChanges(ctx context.Context, changes *plan.Changes
 
 			recordType, err := convertRecordType(ep.RecordType)
 			if err != nil {
-				return err
+				return nil, err
 			}
 
 			for _, target := range ep.Targets {
 				linodeCreates = append(linodeCreates, LinodeChangeCreate{
-					Domain: zone,
-					Options: linodego.DomainRecordCreateOptions{
-						Target:   target,
-						Name:     getStrippedRecordName(zone, ep),
-						Type:     recordType,
-						Weight:   getWeight(recordType),
-						Port:     getPort(),
-						Priority: getPriority(),
-						TTLSec:   int(ep.RecordTTL),
-					},
+					Domain:  zone,
+					Options: newLinodeCreateOptions(zone, ep, recordType, target),
 				})
 			}
 		}
 	}
 
-	// Generate Updates
+	return linodeCreates, nil
+}
+
+// buildLinodeUpdates converts planned record updates into Linode API calls.
+// Targets matched to an existing record are updated, new targets are created
+// and existing records without a target are deleted.
+func buildLinodeUpdates(zonesByID map[string]linodego.Domain, recordsByZoneID map[string][]linodego.DomainRecord, updatesByZone map[string][]endpoint.Endpoint) ([]LinodeChangeCreate, []LinodeChangeUpdate, []LinodeChangeDelete, error) {
+	var linodeCreates []LinodeChangeCreate
+	var linodeUpdates []LinodeChangeUpdate
+	var linodeDeletes []LinodeChangeDelete
+
 	for zoneID, updates := range updatesByZone {
 		zone := zonesByID[zoneID]
 
@@ -392,7 +417,7 @@ func (p *LinodeProvider) ApplyChanges(ctx context.Context, changes *plan.Changes
 
 			recordType, err := convertRecordType(ep.RecordType)
 			if err != nil {
-				return err
+				return nil, nil, nil, err
 			}
 
 			matchedRecordsByTarget := make(map[string]linodego.DomainRecord)
@@ -414,15 +439,7 @@ func (p *LinodeProvider) ApplyChanges(ctx context.Context, changes *plan.Changes
 					linodeUpdates = append(linodeUpdates, LinodeChangeUpdate{
 						Domain:       zone,
 						DomainRecord: record,
-						Options: linodego.DomainRecordUpdateOptions{
-							Target:   target,
-							Name:     getStrippedRecordName(zone, ep),
-							Type:     recordType,
-							Weight:   getWeight(recordType),
-							Port:     getPort(),
-							Priority: getPriority(),
-							TTLSec:   int(ep.RecordTTL),
-						},
+						Options:      newLinodeUpdateOptions(zone, ep, recordType, target),
 					})
 
 					delete(matchedRecordsByTarget, target)
@@ -437,16 +454,8 @@ func (p *LinodeProvider) ApplyChanges(ctx context.Context, changes *plan.Changes
 					}).Warn("Creating New Target")
 
 					linodeCreates = append(linodeCreates, LinodeChangeCreate{
-						Domain: zone,
-						Options: linodego.DomainRecordCreateOptions{
-							Target:   target,
-							Name:     getStrippedRecordName(zone, ep),
-							Type:     recordType,
-							Weight:   getWeight(recordType),
-							Port:     getPort(),
-							Priority: getPriority(),
-							TTLSec:   int(ep.RecordTTL),
-						},
+						Domain:  zone,
+						Options: newLinodeCreateOptions(zone, ep, recordType, target),
 					})
 				}
 			}
@@ -469,7 +478,13 @@ func (p *LinodeProvider) ApplyChanges(ctx context.Context, changes *plan.Changes
 		}
 	}
 
-	// Generate Deletes
+	return linodeCreates, linodeUpdates, linodeDeletes, nil
+}
+
+// buildLinodeDeletes converts planned record deletions into Linode API calls.
+func buildLinodeDeletes(zonesByID map[string]linodego.Domain, recordsByZoneID map[string][]linodego.DomainRecord, deletesByZone map[string][]endpoint.Endpoint) []LinodeChangeDelete {
+	var linodeDeletes []LinodeChangeDelete
+
 	for zoneID, deletes := range deletesByZone {
 		zone := zonesByID[zoneID]
 
@@ -504,11 +519,34 @@ func (p *LinodeProvider) ApplyChanges(ctx context.Context, changes *plan.Changes
 		}
 	}
 
-	return p.submitChanges(ctx, LinodeChanges{
-		Creates: linodeCreates,
-		Deletes: linodeDeletes,
-		Updates: linodeUpdates,
-	})
+	return linodeDeletes
+}
+
+// newLinodeCreateOptions builds the Linode create options shared by the
+// planned-creation and update paths.
+func newLinodeCreateOptions(zone linodego.Domain, ep endpoint.Endpoint, recordType linodego.DomainRecordType, target string) linodego.DomainRecordCreateOptions {
+	return linodego.DomainRecordCreateOptions{
+		Target:   target,
+		Name:     getStrippedRecordName(zone, ep),
+		Type:     recordType,
+		Weight:   getWeight(recordType),
+		Port:     getPort(),
+		Priority: getPriority(),
+		TTLSec:   int(ep.RecordTTL),
+	}
+}
+
+// newLinodeUpdateOptions builds the Linode update options for a matched target.
+func newLinodeUpdateOptions(zone linodego.Domain, ep endpoint.Endpoint, recordType linodego.DomainRecordType, target string) linodego.DomainRecordUpdateOptions {
+	return linodego.DomainRecordUpdateOptions{
+		Target:   target,
+		Name:     getStrippedRecordName(zone, ep),
+		Type:     recordType,
+		Weight:   getWeight(recordType),
+		Port:     getPort(),
+		Priority: getPriority(),
+		TTLSec:   int(ep.RecordTTL),
+	}
 }
 
 func endpointsByZone(zoneNameIDMapper provider.ZoneIDName, endpoints []*endpoint.Endpoint) map[string][]endpoint.Endpoint {
