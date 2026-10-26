@@ -1218,6 +1218,109 @@ func TestRfc2136NameserverFailureReturnsSoftError(t *testing.T) {
 	assert.ErrorIs(t, err, provider.SoftError, "Expected SoftError when nameserver fails in ApplyChanges")
 }
 
+func newFailingRfc2136Provider(t *testing.T) provider.Provider {
+	failingStub := &failingRfc2136Stub{
+		output:                make([]*dns.Envelope, 0),
+		updateMsgs:            make([]*dns.Msg, 0),
+		createMsgs:            make([]*dns.Msg, 0),
+		nameservers:           []string{"unreachable-nameserver:53"},
+		randGen:               rand.New(rand.NewSource(time.Now().UnixNano())),
+		loadBalancingStrategy: "round-robin",
+	}
+
+	tlsConfig := TLSConfig{}
+
+	providerInstance, err := newProvider(
+		[]string{"unreachable-nameserver"},
+		53,
+		[]string{"example.com"},
+		false,
+		false,
+		"key",
+		"secret",
+		"hmac-sha512",
+		true,
+		&endpoint.DomainFilter{},
+		false,
+		300*time.Second,
+		false,
+		"",
+		"",
+		"",
+		50,
+		tlsConfig,
+		"round-robin",
+		failingStub,
+	)
+	require.NoError(t, err)
+
+	return providerInstance
+}
+
+func TestRfc2136ApplyChangesUpdateFailureReturnsSoftError(t *testing.T) {
+	providerInstance := newFailingRfc2136Provider(t)
+
+	err := providerInstance.ApplyChanges(t.Context(), &plan.Changes{
+		UpdateOld: []*endpoint.Endpoint{
+			{
+				DNSName:    "test.example.com",
+				RecordType: "A",
+				Targets:    []string{"1.2.3.4"},
+			},
+		},
+		UpdateNew: []*endpoint.Endpoint{
+			{
+				DNSName:    "test.example.com",
+				RecordType: "A",
+				Targets:    []string{"5.6.7.8"},
+			},
+		},
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, provider.SoftError, "Expected SoftError when nameserver fails in ApplyChanges")
+}
+
+func TestRfc2136ApplyChangesDeleteFailureReturnsSoftError(t *testing.T) {
+	providerInstance := newFailingRfc2136Provider(t)
+
+	err := providerInstance.ApplyChanges(t.Context(), &plan.Changes{
+		Delete: []*endpoint.Endpoint{
+			{
+				DNSName:    "test.example.com",
+				RecordType: "A",
+				Targets:    []string{"1.2.3.4"},
+			},
+		},
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, provider.SoftError, "Expected SoftError when nameserver fails in ApplyChanges")
+}
+
+func TestRfc2136ApplyChangesContinuesAfterBatchFailure(t *testing.T) {
+	providerInstance := newFailingRfc2136Provider(t)
+
+	err := providerInstance.ApplyChanges(t.Context(), &plan.Changes{
+		Create: []*endpoint.Endpoint{
+			{
+				DNSName:    "test.example.com",
+				RecordType: "A",
+				Targets:    []string{"1.2.3.4"},
+			},
+		},
+		Delete: []*endpoint.Endpoint{
+			{
+				DNSName:    "test2.example.com",
+				RecordType: "A",
+				Targets:    []string{"5.6.7.8"},
+			},
+		},
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, provider.SoftError, "Expected SoftError when nameserver fails in ApplyChanges")
+	// The delete batch is still processed after the create batch fails.
+	assert.Equal(t, 2, strings.Count(err.Error(), "failed to connect"))
+}
+
 // axfrEnvelopeErrorStub returns a valid envelope followed by an error envelope.
 type axfrEnvelopeErrorStub struct {
 	rfc2136Stub
