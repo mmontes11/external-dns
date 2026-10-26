@@ -215,8 +215,41 @@ func (im *TXTRegistry) Records(ctx context.Context) ([]*endpoint.Endpoint, error
 		return nil, err
 	}
 
-	endpoints := []*endpoint.Endpoint{}
+	endpoints, labelMap := im.separateTXTRecords(records)
 
+	for _, ep := range endpoints {
+		if ep.Labels == nil {
+			ep.Labels = endpoint.NewLabels()
+		}
+
+		labels, labelsExist := im.labelsForEndpoint(ep, labelMap)
+		if labelsExist {
+			maps.Copy(ep.Labels, labels)
+		}
+
+		if im.oldOwnerID != "" && ep.Labels[endpoint.OwnerLabelKey] == im.oldOwnerID {
+			ep.Labels[endpoint.OwnerLabelKey] = im.ownerID
+		}
+
+		// TODO: remove this migration logic in some future release
+		// Handle the migration of TXT records created before the new format (introduced in v0.12.0).
+		// The migration is done for the TXT records owned by this instance only.
+		im.markMissingOwnershipTXT(ep)
+	}
+
+	// Update the cache.
+	if im.cacheInterval > 0 {
+		im.recordsCache = endpoints
+		im.recordsCacheRefreshTime = time.Now()
+	}
+
+	return endpoints, nil
+}
+
+// separateTXTRecords returns the non-TXT records and the heritage labels of the TXT
+// records, keyed by the endpoint they own.
+func (im *TXTRegistry) separateTXTRecords(records []*endpoint.Endpoint) ([]*endpoint.Endpoint, map[endpoint.EndpointKey]endpoint.Labels) {
+	endpoints := []*endpoint.Endpoint{}
 	labelMap := map[endpoint.EndpointKey]endpoint.Labels{}
 
 	for _, record := range records {
@@ -249,70 +282,59 @@ func (im *TXTRegistry) Records(ctx context.Context) ([]*endpoint.Endpoint, error
 		im.existingTXTs.add(record)
 	}
 
-	for _, ep := range endpoints {
-		if ep.Labels == nil {
-			ep.Labels = endpoint.NewLabels()
-		}
-		dnsNameSplit := strings.Split(ep.DNSName, ".")
-		// If specified, replace a leading asterisk in the generated txt record name with some other string
-		if im.wildcardReplacement != "" && dnsNameSplit[0] == "*" {
-			dnsNameSplit[0] = im.wildcardReplacement
-		}
-		dnsName := strings.Join(dnsNameSplit, ".")
-		key := endpoint.EndpointKey{
-			DNSName:       dnsName,
-			RecordType:    ep.RecordType,
-			SetIdentifier: ep.SetIdentifier,
-		}
+	return endpoints, labelMap
+}
 
-		labels, labelsExist := labelMap[key]
+// labelsForEndpoint returns the heritage labels for the endpoint, falling back to the
+// legacy "cname-" alias key and to the record-type-less key used by the old format.
+func (im *TXTRegistry) labelsForEndpoint(ep *endpoint.Endpoint, labelMap map[endpoint.EndpointKey]endpoint.Labels) (endpoint.Labels, bool) {
+	dnsNameSplit := strings.Split(ep.DNSName, ".")
+	// If specified, replace a leading asterisk in the generated txt record name with some other string
+	if im.wildcardReplacement != "" && dnsNameSplit[0] == "*" {
+		dnsNameSplit[0] = im.wildcardReplacement
+	}
+	dnsName := strings.Join(dnsNameSplit, ".")
+	key := endpoint.EndpointKey{
+		DNSName:       dnsName,
+		RecordType:    ep.RecordType,
+		SetIdentifier: ep.SetIdentifier,
+	}
 
-		// A ALIAS records used the legacy "cname-" prefix. Fall back to it so ownership
-		// survives migration to "a-", and report the stale record once. See issue #2903.
-		if isAliasARecord(ep) {
-			legacyKey := key
-			legacyKey.RecordType = endpoint.RecordTypeCNAME
-			if legacyLabels, ok := labelMap[legacyKey]; ok {
-				if !labelsExist {
-					labels, labelsExist = legacyLabels, true
-				}
-				im.warnObsoleteAliasTXT(dnsName)
+	labels, labelsExist := labelMap[key]
+
+	// A ALIAS records used the legacy "cname-" prefix. Fall back to it so ownership
+	// survives migration to "a-", and report the stale record once. See issue #2903.
+	if isAliasARecord(ep) {
+		legacyKey := key
+		legacyKey.RecordType = endpoint.RecordTypeCNAME
+		if legacyLabels, ok := labelMap[legacyKey]; ok {
+			if !labelsExist {
+				labels, labelsExist = legacyLabels, true
 			}
-		}
-
-		// Handle both new and old registry format with the preference for the new one
-		if !labelsExist && ep.RecordType != endpoint.RecordTypeAAAA {
-			key.RecordType = ""
-			labels, labelsExist = labelMap[key]
-		}
-		if labelsExist {
-			maps.Copy(ep.Labels, labels)
-		}
-
-		if im.oldOwnerID != "" && ep.Labels[endpoint.OwnerLabelKey] == im.oldOwnerID {
-			ep.Labels[endpoint.OwnerLabelKey] = im.ownerID
-		}
-
-		// TODO: remove this migration logic in some future release
-		// Handle the migration of TXT records created before the new format (introduced in v0.12.0).
-		// The migration is done for the TXT records owned by this instance only.
-		if len(im.existingTXTs.entries) > 0 && ep.Labels[endpoint.OwnerLabelKey] == im.ownerID {
-			if plan.IsManagedRecord(ep.RecordType, im.managedRecordTypes, im.excludeRecordTypes) {
-				// Name only: rendering the value would encrypt every owned record's labels on each call.
-				if txtName := im.txtRecordName(ep); txtName != "" && !im.existingTXTs.has(txtName, ep.SetIdentifier) {
-					ep.WithProviderSpecific(providerSpecificForceUpdate, "true")
-				}
-			}
+			im.warnObsoleteAliasTXT(dnsName)
 		}
 	}
 
-	// Update the cache.
-	if im.cacheInterval > 0 {
-		im.recordsCache = endpoints
-		im.recordsCacheRefreshTime = time.Now()
+	// Handle both new and old registry format with the preference for the new one
+	if !labelsExist && ep.RecordType != endpoint.RecordTypeAAAA {
+		key.RecordType = ""
+		labels, labelsExist = labelMap[key]
 	}
 
-	return endpoints, nil
+	return labels, labelsExist
+}
+
+// markMissingOwnershipTXT arms a force update when an owned record's TXT is missing,
+// so it is re-created with the current registry format.
+func (im *TXTRegistry) markMissingOwnershipTXT(ep *endpoint.Endpoint) {
+	if len(im.existingTXTs.entries) > 0 && ep.Labels[endpoint.OwnerLabelKey] == im.ownerID {
+		if plan.IsManagedRecord(ep.RecordType, im.managedRecordTypes, im.excludeRecordTypes) {
+			// Name only: rendering the value would encrypt every owned record's labels on each call.
+			if txtName := im.txtRecordName(ep); txtName != "" && !im.existingTXTs.has(txtName, ep.SetIdentifier) {
+				ep.WithProviderSpecific(providerSpecificForceUpdate, "true")
+			}
+		}
+	}
 }
 
 // isAliasARecord reports whether the endpoint is an A ALIAS record (used to recognize the legacy

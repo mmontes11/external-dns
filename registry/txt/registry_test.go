@@ -147,6 +147,47 @@ func TestTXTRegistry_Records_NilLabels(t *testing.T) {
 	require.NotNil(t, endpoints[0].Labels)
 }
 
+func TestTXTRegistryRecordsOldOwnerIDMigration(t *testing.T) {
+	managedRecords := []string{endpoint.RecordTypeA, endpoint.RecordTypeCNAME, endpoint.RecordTypeAAAA, endpoint.RecordTypeTXT}
+
+	for _, ti := range []struct {
+		title    string
+		existing []*endpoint.Endpoint
+	}{
+		{
+			title: "new format TXT with record type prefix",
+			existing: []*endpoint.Endpoint{
+				newEndpointWithOwner("test."+testZone, "1.2.3.4", endpoint.RecordTypeA, ""),
+				newEndpointWithOwner("a-test."+testZone, "\"heritage=external-dns,external-dns/owner=old-owner\"", endpoint.RecordTypeTXT, ""),
+			},
+		},
+		{
+			title: "legacy format TXT sharing the record name",
+			existing: []*endpoint.Endpoint{
+				newEndpointWithOwner("test."+testZone, "1.2.3.4", endpoint.RecordTypeA, ""),
+				newEndpointWithOwner("test."+testZone, "\"heritage=external-dns,external-dns/owner=old-owner\"", endpoint.RecordTypeTXT, ""),
+			},
+		},
+	} {
+		t.Run(ti.title, func(t *testing.T) {
+			ctx := t.Context()
+			p := inmemory.NewInMemoryProvider()
+			require.NoError(t, p.CreateZone(testZone))
+			require.NoError(t, p.ApplyChanges(ctx, &plan.Changes{Create: ti.existing}))
+
+			registry, err := newRegistry(p, "", "", "owner", 0, "", managedRecords, nil, false, nil, "old-owner")
+			require.NoError(t, err)
+
+			records, err := registry.Records(ctx)
+			require.NoError(t, err)
+
+			aRecord := findEndpoint(records, "test."+testZone, endpoint.RecordTypeA)
+			require.NotNil(t, aRecord)
+			require.Equal(t, "owner", aRecord.Labels[endpoint.OwnerLabelKey], "the old owner ID must be migrated to the current one")
+		})
+	}
+}
+
 func TestNew(t *testing.T) {
 	p := inmemory.NewInMemoryProvider()
 	cfg := &externaldns.Config{
