@@ -1012,30 +1012,45 @@ func (p *AlibabaCloudProvider) updatePrivateZoneRecords(zones map[string]*alibab
 			log.Errorf("Failed to update %s record named '%s' for Alibaba Cloud Private Zone: failed to find private zone '%s'", endpoint.RecordType, endpoint.DNSName, domain)
 			continue
 		}
+		p.reconcilePrivateZoneRecords(zone, rr, endpoint)
+		p.createMissingPrivateZoneRecords(zones, zone, rr, endpoint)
+	}
+}
 
-		for _, record := range zone.records {
-			if record.Rr != rr || record.Type != endpoint.RecordType {
-				continue
-			}
-			found := slices.Contains(endpoint.Targets, record.Value)
-			if found {
-				if !p.equalsPrivateZone(record, endpoint) {
-					// Update record
-					p.updatePrivateZoneRecord(record, endpoint)
-				}
-			} else {
-				p.deletePrivateZoneRecord(record, endpoint)
-			}
+// reconcilePrivateZoneRecords removes zone records whose value is no longer one
+// of the endpoint's targets and updates those whose TTL has drifted.
+func (p *AlibabaCloudProvider) reconcilePrivateZoneRecords(zone *alibabaPrivateZone, rr string, endpoint *endpoint.Endpoint) {
+	for _, record := range zone.records {
+		if record.Rr != rr || record.Type != endpoint.RecordType {
+			continue
 		}
-		for _, target := range endpoint.Targets {
-			found := slices.ContainsFunc(zone.records, func(record pvtz.Record) bool {
-				return record.Rr == rr && record.Type == endpoint.RecordType && record.Value == target
-			})
-			if !found {
-				p.createPrivateZoneRecord(zones, endpoint, target)
+		if slices.Contains(endpoint.Targets, record.Value) {
+			if !p.equalsPrivateZone(record, endpoint) {
+				// Update record
+				p.updatePrivateZoneRecord(record, endpoint)
 			}
+		} else {
+			p.deletePrivateZoneRecord(record, endpoint)
 		}
 	}
+}
+
+// createMissingPrivateZoneRecords creates zone records for any of the endpoint's
+// targets that the zone does not hold yet.
+func (p *AlibabaCloudProvider) createMissingPrivateZoneRecords(zones map[string]*alibabaPrivateZone, zone *alibabaPrivateZone, rr string, endpoint *endpoint.Endpoint) {
+	for _, target := range endpoint.Targets {
+		if !p.privateZoneHasRecord(zone, rr, endpoint.RecordType, target) {
+			p.createPrivateZoneRecord(zones, endpoint, target)
+		}
+	}
+}
+
+// privateZoneHasRecord reports whether the zone already holds a record for the
+// given rr, record type and target value.
+func (p *AlibabaCloudProvider) privateZoneHasRecord(zone *alibabaPrivateZone, rr, recordType, target string) bool {
+	return slices.ContainsFunc(zone.records, func(record pvtz.Record) bool {
+		return record.Rr == rr && record.Type == recordType && record.Value == target
+	})
 }
 
 func keys[T any](value map[string]T) []string {

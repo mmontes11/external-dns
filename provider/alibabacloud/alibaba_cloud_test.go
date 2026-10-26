@@ -600,6 +600,51 @@ func TestAlibabaCloudProvider_PrivateZone_ApplyChanges(t *testing.T) {
 	assert.True(t, testutils.SameEndpoints(changedEndpoints, endpoints), "expected and actual endpoints don't match. %s:%s", changedEndpoints, endpoints)
 }
 
+func TestAlibabaCloudProvider_PrivateZone_UpdateRemovesStaleTarget(t *testing.T) {
+	domain := "container-service.top"
+	provider := newTestAlibabaCloudProviderWithConfig(
+		endpoint.NewDomainFilter([]string{domain}), true, map[string][]*endpoint.Endpoint{
+			domain: {
+				endpoint.NewEndpointWithTTL("abc."+domain, "A", 300, "1.2.3.4", "9.9.9.9"),
+			},
+		},
+	)
+	client := provider.pvtzClient.(*MockAlibabaCloudPrivateZoneAPI)
+	changes := plan.Changes{
+		UpdateNew: []*endpoint.Endpoint{
+			endpoint.NewEndpointWithTTL("abc."+domain, "A", 300, "1.2.3.4"),
+		},
+	}
+
+	err := provider.ApplyChanges(t.Context(), &changes)
+	require.NoError(t, err, "Failed to apply changes: %v", err)
+	assert.Zero(t, client.addZoneRecordCalls)
+	assert.Zero(t, client.updateZoneRecordCalls)
+	assert.Equal(t, 1, client.deleteZoneRecordCalls)
+
+	endpoints, err := provider.Records(t.Context())
+	require.NoError(t, err, "Failed to get records: %v", err)
+	assert.True(t, testutils.SameEndpoints([]*endpoint.Endpoint{
+		endpoint.NewEndpointWithTTL("abc."+domain, "A", 300, "1.2.3.4"),
+	}, endpoints), "expected and actual endpoints don't match. %s:%s", endpoints, endpoints)
+}
+
+func TestAlibabaCloudProvider_PrivateZone_UpdateSkipsUnknownZone(t *testing.T) {
+	provider := newTestAlibabaCloudProvider(true)
+	client := provider.pvtzClient.(*MockAlibabaCloudPrivateZoneAPI)
+	changes := plan.Changes{
+		UpdateNew: []*endpoint.Endpoint{
+			endpoint.NewEndpointWithTTL("abc.unknown-zone.top", "A", 300, "1.2.3.4"),
+		},
+	}
+
+	err := provider.ApplyChanges(t.Context(), &changes)
+	require.NoError(t, err, "Failed to apply changes: %v", err)
+	assert.Zero(t, client.addZoneRecordCalls)
+	assert.Zero(t, client.updateZoneRecordCalls)
+	assert.Zero(t, client.deleteZoneRecordCalls)
+}
+
 func TestAlibabaCloudProvider_DNSDryRun(t *testing.T) {
 	provider := newTestAlibabaCloudProvider(false)
 	provider.dryRun = true
