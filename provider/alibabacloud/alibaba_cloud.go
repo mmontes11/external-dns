@@ -1013,27 +1013,37 @@ func (p *AlibabaCloudProvider) updatePrivateZoneRecords(zones map[string]*alibab
 			continue
 		}
 
-		for _, record := range zone.records {
-			if record.Rr != rr || record.Type != endpoint.RecordType {
-				continue
-			}
-			found := slices.Contains(endpoint.Targets, record.Value)
-			if found {
-				if !p.equalsPrivateZone(record, endpoint) {
-					// Update record
-					p.updatePrivateZoneRecord(record, endpoint)
-				}
-			} else {
-				p.deletePrivateZoneRecord(record, endpoint)
-			}
+		p.updateExistingPrivateZoneRecords(zone, endpoint, rr)
+		p.createMissingPrivateZoneRecords(zones, zone, endpoint, rr)
+	}
+}
+
+// updateExistingPrivateZoneRecords deletes records whose value is no longer
+// wanted and updates the ones that are kept but have a different TTL.
+func (p *AlibabaCloudProvider) updateExistingPrivateZoneRecords(zone *alibabaPrivateZone, endpoint *endpoint.Endpoint, rr string) {
+	for _, record := range zone.records {
+		if record.Rr != rr || record.Type != endpoint.RecordType {
+			continue
 		}
-		for _, target := range endpoint.Targets {
-			found := slices.ContainsFunc(zone.records, func(record pvtz.Record) bool {
-				return record.Rr == rr && record.Type == endpoint.RecordType && record.Value == target
-			})
-			if !found {
-				p.createPrivateZoneRecord(zones, endpoint, target)
-			}
+		if !slices.Contains(endpoint.Targets, record.Value) {
+			p.deletePrivateZoneRecord(record, endpoint)
+			continue
+		}
+		if !p.equalsPrivateZone(record, endpoint) {
+			// Update record
+			p.updatePrivateZoneRecord(record, endpoint)
+		}
+	}
+}
+
+// createMissingPrivateZoneRecords creates every target that does not exist yet.
+func (p *AlibabaCloudProvider) createMissingPrivateZoneRecords(zones map[string]*alibabaPrivateZone, zone *alibabaPrivateZone, endpoint *endpoint.Endpoint, rr string) {
+	for _, target := range endpoint.Targets {
+		found := slices.ContainsFunc(zone.records, func(record pvtz.Record) bool {
+			return record.Rr == rr && record.Type == endpoint.RecordType && record.Value == target
+		})
+		if !found {
+			p.createPrivateZoneRecord(zones, endpoint, target)
 		}
 	}
 }
