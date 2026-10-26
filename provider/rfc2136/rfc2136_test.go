@@ -1316,7 +1316,7 @@ func TestRfc2136ApplyChangesContinuesAfterBatchFailure(t *testing.T) {
 		},
 	})
 	require.Error(t, err)
-	assert.ErrorIs(t, err, provider.SoftError, "Expected SoftError when nameserver fails in ApplyChanges")
+	require.ErrorIs(t, err, provider.SoftError, "Expected SoftError when nameserver fails in ApplyChanges")
 	// The delete batch is still processed after the create batch fails.
 	assert.Equal(t, 2, strings.Count(err.Error(), "failed to connect"))
 }
